@@ -1,91 +1,63 @@
-const Queue = require("bull");
-const sgMail = require("@sendgrid/mail");
-const { getRandomDelay, delay } = require("./randomDelay");
-const dotenv = require("dotenv");
-const { Email } = require("../models/email.model");
-const Redis = require("ioredis");
+const sgMail = require('@sendgrid/mail');
+const { Email } = require('../models/email.model');
+const { Job } = require('../models/job.model');
+const dotenv = require('dotenv');
 
 dotenv.config();
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
-const redisClient = new Redis(process.env.REDIS_URL, {
-  maxRetriesPerRequest: null,
-  enableReadyCheck: false,
-  reconnectOnError: (err) => {
-    console.error("Redis reconnecting due to error:", err.message);
-    return true;
-  },
-  retryStrategy: (times) => {
-    const delay = Math.min(times * 1000, 5000);
-    console.log(`Retrying Redis connection in ${delay}ms...`);
-    return delay;
-  },
-  tls: process.env.REDIS_URL?.startsWith("rediss://") ? {} : undefined,
-});
-
-redisClient.on("error", (err) => {
-  console.error("Redis Error:", err.message);
-});
-
-redisClient.on("connect", () => {
-  console.log("Redis connected successfully!");
-});
-
-redisClient.on("error", (err) => console.error("Redis Error:", err));
-redisClient.on("connect", () => console.log("Redis connected successfully!"));
-
-const emailQueue = new Queue("emailQueue", { redis: { client: redisClient } });
-
-emailQueue.on("error", (error) => console.error("Queue error:", error));
-emailQueue.on("waiting", (jobId) => console.log(`Job ${jobId} is waiting`));
-emailQueue.on("active", (job) => console.log(`Job ${job.id} is active`));
-emailQueue.on("completed", (job) => console.log(`Job ${job.id} completed`));
-emailQueue.on("failed", (job, error) => console.error(`Job ${job.id} failed:`, error));
-emailQueue.on("ready", () => console.log("Queue is ready"));
-emailQueue.on("stalled", (jobId) => console.log(`Job ${jobId} stalled`));
-
-const sendEmail = async (email) => {
+const sendEmail = async (email, retries = 3) => {
   try {
     await sgMail.send(email);
     console.log(`Email sent to ${email.to}`);
-    await Email.findByIdAndUpdate(email.emailId, { status: "sent" });
+
+    await Email.findByIdAndUpdate(email.emailId, { status: 'sent' });
   } catch (error) {
     console.error(`Failed to send email to ${email.to}:`, error);
-    await Email.findByIdAndUpdate(email.emailId, { status: "failed" });
-    throw error; // Allow Bull to retry the job
-  }
-};
 
-const processEmailsInBatches = async (emails, job) => {
-  let remainingEmails = [...emails];
-  let totalDelay = 0;
-
-  while (remainingEmails.length > 0) {
-    const batchSize = job.data.batchSize || getRandomDelay(3, 10);
-    const batch = remainingEmails.splice(0, batchSize);
-    const batchDelay = job.data.batchDelay || getRandomDelay(1, 5) * 60000;
-    totalDelay += batchDelay;
-
-    await delay(totalDelay);
-    for (const email of batch) {
-      await sendEmail(email);
-      await delay(getRandomDelay(1000, 5000));
-      job.progress((emails.length - remainingEmails.length) / emails.length * 100);
+    if (retries > 0) {
+      console.log(`Retrying email to ${email.to} (${retries} retries left)...`);
+      await new Promise((resolve) => setTimeout(resolve, 5000));
+      await sendEmail(email, retries - 1); 
+    } else {
+      await Email.findByIdAndUpdate(email.emailId, { status: 'failed' });
+      throw error;
     }
   }
 };
 
-emailQueue.process(5, async (job) => { // Process 5 jobs concurrently
-  console.log("Processor started for job:", job.id);
-  const { emails } = job.data;
-  console.log(`Processing ${emails.length} emails...`);
-  await processEmailsInBatches(emails, job);
-});
+const addToQueue = async (emails) => {
+  console.log('Adding emails to the queue...');
+  const jobs = emails.map((email) => ({ email, status: 'pending' }));
+  await Job.insertMany(jobs);
+};
 
-process.on("SIGTERM", async () => {
-  await emailQueue.close();
-  redisClient.disconnect();
-  process.exit(0);
-});
+const processQueue = async () => {
+  console.log('Processing email queue...');
 
-module.exports = emailQueue;
+  const jobs = await Job.find({ status: 'pending' }).limit(10); 
+  console.log(`Found ${jobs.length} pending jobs.`);
+
+  for (const job of jobs) {
+    try {
+      console.log(`Processing job ${job._id}...`);
+
+      await Job.findByIdAndUpdate(job._id, { status: 'processing' });
+      console.log(`Job ${job._id} marked as processing.`);
+
+      await sendEmail(job.email);
+
+      await Job.findByIdAndDelete(job._id); 
+      console.log(`Job ${job._id} completed and removed from the database.`);
+    } catch (error) {
+      console.error('Failed to process job:', error);
+
+      await Job.findByIdAndDelete(job._id);
+      console.log(`Job ${job._id} failed and removed from the database.`);
+    } finally {
+      await new Promise((resolve) => setTimeout(resolve, 100)); 
+    }
+  }
+};
+
+module.exports = { addToQueue, processQueue };

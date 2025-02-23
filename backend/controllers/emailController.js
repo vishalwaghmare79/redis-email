@@ -1,16 +1,16 @@
-const fs = require("fs");
-const { Email } = require("../models/email.model");
-const { User } = require("../models/user.model");
-const emailQueue = require("../helpers/emailQueue");
+const fs = require('fs');
+const { Email } = require('../models/email.model');
+const { User } = require('../models/user.model');
+const { addToQueue } = require('../helpers/emailQueue');
 
 const sendEmails = async (req, res) => {
   const sender = req.user._id;
-  const user = await User.findById(sender).select("email").lean();
+  const user = await User.findById(sender).select('email').lean();
   const userEmail = user.email;
 
   const { recipients, subject, content } = req.body;
   if (!recipients || !subject || !content) {
-    return res.status(400).json({ message: "Missing required fields" });
+    return res.status(400).json({ message: 'Missing required fields' });
   }
 
   try {
@@ -20,10 +20,10 @@ const sendEmails = async (req, res) => {
     if (req.file) {
       const fileData = fs.readFileSync(req.file.path);
       attachments.push({
-        content: fileData.toString("base64"),
+        content: fileData.toString('base64'),
         filename: req.file.originalname,
         type: req.file.mimetype,
-        disposition: "attachment",
+        disposition: 'attachment',
       });
       fs.unlinkSync(req.file.path);
     }
@@ -32,40 +32,36 @@ const sendEmails = async (req, res) => {
       to: recipient.email,
       from: userEmail,
       subject,
-      text: content.replace("{name}", recipient.name),
+      text: content.replace('{name}', recipient.name),
       attachments,
     }));
 
     const savedEmails = await Promise.all(
       recipientList.map(async (recipient) => {
-        const text = content.replace("{name}", recipient.name);
+        const text = content.replace('{name}', recipient.name);
         const emailEntry = new Email({
           name: recipient.name,
           email: recipient.email,
           subject,
           content: text,
           sender,
-          status: "pending",
+          status: 'pending',
         });
         return emailEntry.save();
       })
     );
 
-    const jobs = emails.map((email, index) => {
-      const jobData = {
-        emails: [{
-          ...email,
-          emailId: savedEmails[index]._id,
-        }],
-      };
-      console.log("Adding job to queue:", jobData);
-      return emailQueue.add(jobData);
-    });
+    const jobs = emails.map((email, index) => ({
+      ...email,
+      emailId: savedEmails[index]._id,
+    }));
 
-    res.status(200).json({ message: "Emails queued successfully", savedEmails });
+    await addToQueue(jobs);
+
+    res.status(200).json({ message: 'Emails Send successfully', savedEmails });
   } catch (error) {
-    console.error("Error queuing emails:", error);
-    res.status(500).json({ message: "Error queuing emails", error });
+    console.error('Error queuing emails:', error);
+    res.status(500).json({ message: 'Error queuing emails', error });
   }
 };
 
