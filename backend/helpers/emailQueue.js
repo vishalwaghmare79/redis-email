@@ -12,10 +12,23 @@ const redisClient = new Redis(process.env.REDIS_URL, {
   maxRetriesPerRequest: null,
   enableReadyCheck: false,
   reconnectOnError: (err) => {
-    console.error("Redis reconnecting due to error:", err);
+    console.error("Redis reconnecting due to error:", err.message);
     return true;
   },
+  retryStrategy: (times) => {
+    const delay = Math.min(times * 1000, 5000);
+    console.log(`Retrying Redis connection in ${delay}ms...`);
+    return delay;
+  },
   tls: process.env.REDIS_URL?.startsWith("rediss://") ? {} : undefined,
+});
+
+redisClient.on("error", (err) => {
+  console.error("Redis Error:", err.message);
+});
+
+redisClient.on("connect", () => {
+  console.log("Redis connected successfully!");
 });
 
 redisClient.on("error", (err) => console.error("Redis Error:", err));
